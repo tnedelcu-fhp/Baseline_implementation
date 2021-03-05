@@ -1,0 +1,240 @@
+#!/usr/bin/env python
+# coding: utf-8
+
+# In[2]:
+
+
+import tensorflow as tf
+from tensorflow import keras
+from keras.models import Sequential
+from keras_preprocessing.image import ImageDataGenerator
+from keras.layers import Dense, Activation, Flatten, Dropout, BatchNormalization
+from keras.layers import Conv2D, MaxPooling2D
+from keras import regularizers, optimizers
+import pandas as pd
+import numpy as np
+from tensorflow.keras import layers
+from tensorflow.keras.layers.experimental import preprocessing
+from tensorflow.keras.applications import EfficientNetB3
+from sklearn.model_selection import train_test_split
+# from imblearn.over_sampling import RandomOverSampler
+import matplotlib.pyplot as plt
+import math
+import datetime
+from keras.callbacks import Callback
+
+'''
+from tensorflow.compat.v1.keras.backend import set_session
+config = tf.compat.v1.ConfigProto()
+config.gpu_options.allow_growth = True
+config.log_device_placement = True
+sess = tf.compat.v1.Session(config=config)
+set_session(sess)
+'''
+
+
+def append_ext(fn):
+    return fn + ".jpg"
+
+
+traindf = pd.read_csv('C:\\Tudor\\FhP\\DermAI\\Data\\ISIC-2017_Training_Part3_GroundTruth.csv', dtype=str)
+testdf = pd.read_csv('C:\\Tudor\\FhP\\DermAI\\Data\\ISIC-2017_Test_v2_Part3_GroundTruth.csv', dtype=str)
+traindf['image_id'] = traindf['image_id'].apply(append_ext)
+testdf['image_id'] = testdf['image_id'].apply(append_ext)
+
+IMG_SIZE = 300  # B3
+# IMG_SIZE = 600  # B7
+
+# create a label column
+label = [0] * traindf.shape[0]
+for i in range(traindf.shape[0]):
+    if traindf['melanoma'][i] == '1.0':
+        label[i] = '1'
+    else:
+        label[i] = '0'
+traindf['label'] = label
+
+label = [0] * testdf.shape[0]
+for i in range(testdf.shape[0]):
+    if testdf['melanoma'][i] == '1.0':
+        label[i] = '1'
+    else:
+        label[i] = '0'
+testdf['label'] = label
+
+X = traindf.loc[:, 'image_id']
+y = traindf.loc[:, 'label']
+
+train_x, val_x, train_y, val_y = train_test_split(X, y,
+                                                  test_size=0.2,
+                                                  random_state=27,
+                                                  stratify=y)
+
+
+# a function to shuffle data and then build alternately (1 row melanoma, 1 non-melanoma and so-on)
+
+def shuffle_sortdataframe(train_x, train_y, IMG_SIZE):
+    # Training Dataframe
+    train_df = pd.DataFrame(data=np.column_stack((train_x, train_y)), columns=['image_id', 'label'])
+
+    cs = train_y.value_counts()
+    max_cls = np.max(cs.to_list())
+    grouped = train_df.groupby(train_df.label)
+    conc = []
+    for i in range(len(cs)):
+        ds = math.ceil(max_cls / cs.to_list()[i])
+        globals()['dfi_%s' % i] = grouped.get_group(cs.index[i]).reset_index(drop=True)
+        for ij in range(ds):
+            globals()['dff_%s' % ij] = grouped.get_group(cs.index[i]).reset_index(drop=True)
+            if ij == 0:
+                globals()['dfi_%s' % i] = globals()['dfi_%s' % i].sample(frac=1).reset_index(drop=True)
+            else:
+                globals()['dfi_%s' % i] = pd.concat(
+                    [globals()['dfi_%s' % i], globals()['dff_%s' % i].sample(frac=1).reset_index(drop=True)],
+                    ignore_index=True)
+        globals()['dfi_%s' % i] = globals()['dfi_%s' % i][:max_cls]
+        a = 2
+
+    # Concatenate both dataframes alternately
+    df_train_upsampled = pd.concat([globals()['dfi_%s' % 0].reset_index(drop=True),
+                                    globals()['dfi_%s' % 1].reset_index(drop=True)]).sort_index()
+    # df_train_upsampled = globals()['dfi_%s' % i]
+    # print(df_train_upsampled)
+
+    train_datagen = ImageDataGenerator(rotation_range=5,  # rotation
+                                       width_shift_range=0.2,  # horizontal shift
+                                       zoom_range=0.2,  # zoom
+                                       horizontal_flip=True,  # horizontal flip
+                                       brightness_range=[0.2, 0.8]  # brightness
+                                       # rescale=1./255.
+                                       )
+
+    train_generator = train_datagen.flow_from_dataframe(dataframe=df_train_upsampled,
+                                                        directory='C:\\Tudor\\FhP\\DermAI\\Data\\ISIC-2017_Training_Data\\',
+                                                        x_col='image_id',
+                                                        y_col='label',
+                                                        batch_size=2,
+                                                        seed=42,
+                                                        shuffle=False,
+                                                        class_mode='binary',
+                                                        drop_duplicates=False,
+                                                        target_size=(IMG_SIZE, IMG_SIZE)
+                                                        )
+
+    return train_generator
+
+
+train_generator = shuffle_sortdataframe(train_x=train_x, train_y=train_y, IMG_SIZE=IMG_SIZE)
+
+# Validation Dataframe
+df_val = pd.DataFrame(columns=['image_id', 'label'])
+df_val['image_id'] = val_x
+df_val['label'] = val_y
+
+# In[10]:
+
+
+valid_datagen = ImageDataGenerator()  # rescale=1./255.)
+valid_generator = valid_datagen.flow_from_dataframe(dataframe=df_val,
+                                                    directory='C:\\Tudor\\FhP\\DermAI\\Data\\ISIC-2017_Training_Data\\',
+                                                    x_col='image_id',
+                                                    y_col='label',
+                                                    batch_size=16,
+                                                    seed=42,
+                                                    shuffle=False,
+                                                    class_mode='binary',
+                                                    target_size=(IMG_SIZE, IMG_SIZE)
+                                                    )
+
+# In[11]:
+
+
+test_datagen = ImageDataGenerator()  # rescale=1./255.)
+test_generator = test_datagen.flow_from_dataframe(dataframe=testdf,
+                                                  directory='C:\\Tudor\\FhP\\DermAI\\Data\\ISIC-2017_Test_v2_Data\\ISIC-2017_Test_v2_Data\\',
+                                                  x_col='image_id',
+                                                  y_col=None,
+                                                  batch_size=1,
+                                                  seed=40,
+                                                  shuffle=False,
+                                                  class_mode=None,
+                                                  target_size=(IMG_SIZE, IMG_SIZE)
+                                                  )
+
+
+# In[11]:
+
+
+def build_model(num_classes):
+    inputs = layers.Input(shape=(IMG_SIZE, IMG_SIZE, 3))
+    x = inputs
+
+    # Create the base model from the pre-trained model EfficientNet
+    base_model = EfficientNetB3(include_top=False, input_tensor=x, weights="imagenet")
+    for layer in base_model.layers:
+        layer.trainable = False
+
+
+    # Rebuild top
+    x = base_model.output
+    x = layers.Dense(NUM_CLASSES, name='red')(x)
+    x = layers.GlobalAveragePooling2D(name='avg_pool')(x)  # (base_model.output)
+    outputs = layers.Activation('sigmoid', name='pred')(x)
+
+    # Compile
+    model = tf.keras.Model(inputs, outputs, name="EfficientNet")
+    optimizer = tf.keras.optimizers.Adam(learning_rate=1e-3)
+    model.compile(optimizer=optimizer, loss="binary_crossentropy", metrics=["accuracy"]
+                  )
+    return model
+
+
+NUM_CLASSES = 1
+model = build_model(num_classes=NUM_CLASSES)
+
+model.summary()
+
+# how this model performs on this data before fitting
+STEP_SIZE_VALID = valid_generator.n // valid_generator.batch_size
+model.evaluate(valid_generator,
+               steps=STEP_SIZE_VALID)
+
+
+class MyLogger(Callback):
+    def on_epoch_begin(self, epoch, logs=None):
+        train_generator = shuffle_sortdataframe(train_x=train_x, train_y=train_y, IMG_SIZE=IMG_SIZE)
+        print('Dataframe shuffled')
+
+
+# simple early stopping
+# es_fe = tf.keras.callbacks.EarlyStopping(monitor='val_loss', mode='min', verbose=1, patience=5)
+
+
+
+STEP_SIZE_TRAIN = train_generator.n // train_generator.batch_size
+
+c = 0
+blk = [384, 366, 353, 338, 323, 308, 293]
+nopch = 5
+for bl in blk:
+
+    mc_fe = tf.keras.callbacks.ModelCheckpoint('saved_model/block_%s' % c, monitor='val_loss',
+                                               mode='min', verbose=1, save_best_only=False, save_freq='epoch')
+    log_dir = "logs/fit/b_%s" % c + '_' + datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+    tensorboard_callback = tf.keras.callbacks.TensorBoard(log_dir=log_dir, histogram_freq=1)
+    for layer in model.layers[bl:]:
+        if not isinstance(layer, layers.BatchNormalization):
+            layer.trainable = True
+            optimizer = tf.keras.optimizers.Adam(learning_rate=1e-6)
+            if c==0:
+                optimizer = tf.keras.optimizers.Adam(learning_rate=1e-3)
+            model.compile(optimizer=optimizer, loss="binary_crossentropy", metrics=["accuracy"])
+
+    model.fit(train_generator,
+          epochs=c*nopch+nopch,
+          validation_data=valid_generator,
+          verbose=1,
+          callbacks=[mc_fe, MyLogger(), tensorboard_callback],
+          initial_epoch=c*nopch
+          )
+    c = c + 1
